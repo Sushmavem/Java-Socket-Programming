@@ -4,116 +4,213 @@ import java.util.*;
 
 public class MultiClientServer {
 
-    // Store clientName -> ClientHandler
-    private static Map<String, ClientHandler> clients =
-            Collections.synchronizedMap(new HashMap<>());
+    private static final int PORT = 6013;
+
+    // Username -> Output Stream
+    private static HashMap<String, PrintWriter> userMap = new HashMap<>();
+
+    // Username -> IP Address
+    private static HashMap<String, String> clientIPMap = new HashMap<>();
+
+    // Username -> Thread
+    private static HashMap<String, Thread> clientThreadMap = new HashMap<>();
+
 
     public static void main(String[] args) {
 
-        try (ServerSocket serverSocket = new ServerSocket(6013)) {
+        System.out.println("Server started on port " + PORT);
 
-            System.out.println("Server started on port 6013...");
-            System.out.println("Waiting for clients...");
-            new Thread(() -> {
-            Scanner scanner = new Scanner(System.in);
-            while (true) {
-                String message = scanner.nextLine();
-                broadcast("[SERVER]: " + message);
-            }
-        }).start();
-
+        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
 
             while (true) {
-                Socket clientSocket = serverSocket.accept();
-                System.out.println("New client attempting to connect...");
-                ClientHandler handler = new ClientHandler(clientSocket);
-                handler.start(); // MULTITHREADING
+                new ClientHandler(serverSocket.accept()).start();
             }
 
         } catch (IOException e) {
-            e.printStackTrace();
+            System.out.println("Server Error: " + e.getMessage());
         }
     }
 
-    // Broadcast to all clients
-    private static void broadcast(String message) {
-        synchronized (clients) {
-            for (ClientHandler client : clients.values()) {
-                client.sendMessage(message);
-            }
+
+    // Display active users on server
+    private static void displayActiveUsers() {
+
+        System.out.println("\n--- Current Active Users (" + userMap.size() + ") ---");
+
+        for (String user : userMap.keySet()) {
+            System.out.println(" > " + user + " | IP: " + clientIPMap.get(user));
+        }
+
+        System.out.println("---------------------------------\n");
+    }
+
+
+    // Send updated client list to all clients
+    private static void sendClientList() {
+
+        StringBuilder list = new StringBuilder("CLIENTLIST ");
+
+        for (String user : userMap.keySet()) {
+            list.append(user).append(" ");
+        }
+
+        for (PrintWriter writer : userMap.values()) {
+            writer.println(list.toString());
         }
     }
 
-    // ================= THREAD CLASS =================
-    static class ClientHandler extends Thread {
+
+
+    private static class ClientHandler extends Thread {
 
         private Socket socket;
-        private BufferedReader in;
+        private String name;
         private PrintWriter out;
-        private String clientName;
+        private BufferedReader in;
 
         public ClientHandler(Socket socket) {
             this.socket = socket;
         }
 
-        public void sendMessage(String message) {
-            out.println(message);
-        }
 
         public void run() {
 
             try {
-                in = new BufferedReader(
-                        new InputStreamReader(socket.getInputStream()));
-                out = new PrintWriter(
-                        socket.getOutputStream(), true);
 
-                // Ask client name
-                out.println("Enter your name:");
-                clientName = in.readLine();
+                in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                out = new PrintWriter(socket.getOutputStream(), true);
 
-                synchronized (clients) {
 
-                    while (clientName == null ||
-                           clientName.trim().isEmpty() ||
-                           clients.containsKey(clientName)) {
+                // USERNAME REGISTRATION
+                while (true) {
 
-                        out.println("Name invalid or already taken. Enter another name:");
-                        clientName = in.readLine();
+                    out.println("SUBMITNAME");
+
+                    name = in.readLine();
+
+                    if (name == null)
+                        return;
+
+                    synchronized (userMap) {
+
+                        if (!name.isEmpty() && !userMap.containsKey(name)) {
+
+                            userMap.put(name, out);
+                            clientIPMap.put(name, socket.getInetAddress().toString());
+                            clientThreadMap.put(name, Thread.currentThread());
+
+                            break;
+                        }
                     }
-
-                    clients.put(clientName, this);
                 }
 
-                System.out.println(clientName + " has joined.");
-                broadcast(">>> " + clientName + " joined the chat.");
+
+                out.println("NAMEACCEPTED " + name);
+
+                System.out.println(name + " has joined the chat.");
+
+                displayActiveUsers();
+                sendClientList();
+
 
                 String message;
 
                 while ((message = in.readLine()) != null) {
 
-                    String formattedMessage =
-                            "[" + clientName + "]: " + message;
+                    // LIST command
+                    if (message.equalsIgnoreCase("LIST")) {
+                        sendClientList();
+                    }
 
-                    System.out.println(formattedMessage);
+                    // PRIVATE MESSAGE
+                    else if (message.startsWith("@")) {
 
-                    broadcast(formattedMessage);
+                        int spaceIndex = message.indexOf(" ");
+
+                        if (spaceIndex != -1) {
+
+                            String recipient = message.substring(1, spaceIndex);
+                            String privateMsg = message.substring(spaceIndex + 1);
+
+                            sendPrivateMessage(recipient, "Private from " + name + ": " + privateMsg);
+                        }
+                    }
+
+                    // BROADCAST COMMAND
+                    else if (message.startsWith("BROADCAST ")) {
+
+                        String msg = message.substring(10);
+
+                        broadcast("Broadcast from " + name + ": " + msg);
+                    }
+
+                    // KICK CLIENT
+                    else if (message.startsWith("KICK ")) {
+
+                        String user = message.substring(5);
+
+                        Thread t = clientThreadMap.get(user);
+
+                        if (t != null) {
+                            broadcast("System: " + user + " was removed by server.");
+                            t.interrupt();
+                        }
+                    }
+
+                    // NORMAL PUBLIC MESSAGE
+                    else {
+
+                        broadcast(name + ": " + message);
+                    }
                 }
 
             } catch (IOException e) {
-                System.out.println("Connection lost with client.");
+
+                System.out.println(name + " disconnected.");
+
             } finally {
 
+                if (name != null) {
+
+                    userMap.remove(name);
+                    clientIPMap.remove(name);
+                    clientThreadMap.remove(name);
+
+                    System.out.println(name + " left the chat.");
+
+                    displayActiveUsers();
+                    sendClientList();
+                }
+
                 try {
-                    if (clientName != null) {
-                        clients.remove(clientName);
-                        broadcast(">>> " + clientName + " left the chat.");
-                        System.out.println(clientName + " disconnected.");
-                    }
                     socket.close();
                 } catch (IOException e) {
-                    e.printStackTrace();
                 }
+            }
+        }
+
+
+        // BROADCAST MESSAGE
+        private void broadcast(String msg) {
+
+            for (PrintWriter writer : userMap.values()) {
+                writer.println(msg);
+            }
+        }
+
+
+        // PRIVATE MESSAGE
+        private void sendPrivateMessage(String recipient, String msg) {
+
+            PrintWriter writer = userMap.get(recipient);
+
+            if (writer != null) {
+
+                writer.println(msg);
+
+            } else {
+
+                out.println("System: User '" + recipient + "' not found.");
             }
         }
     }
